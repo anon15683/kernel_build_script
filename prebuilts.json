@@ -42,7 +42,14 @@
         "bin_path_suffix": "",
         "download_type": "git",
         "repo_url": "https://github.com/exynos1480/android_kernel_samsung_a55x",
-        "branch": "lineage-23.0",
+        "branch": "A556EXXUACYIA",
         "depth": 1
-    }
+    },
+   "SUSFS": {
+       "target_dir_name": "susfs",
+       "bin_path_suffix": "",
+       "download_type": "git",
+       "repo_url": "https://gitlab.com/simonpunk/susfs4ksu.git",
+       "branch": "gki-android14-6.1"
+   }
 }

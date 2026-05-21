@@ -11,6 +11,7 @@ import re
 import stat
 import tempfile
 import math
+import glob
 from pathlib import Path
 from textwrap import dedent
 from typing import Optional
@@ -49,6 +50,8 @@ GAS_PATH = None
 MKBOOT_PATH = None
 ANYKERNEL_PATH = None
 KERNEL_SOURCE_DIR = None
+KSU_NEXT_PATH = None
+SUSFS_PATH = None
 
 # Config for downloading required prebuilts
 PREBUILTS_CONFIG = json.load(open(ROOT_DIR / "prebuilts.json"))
@@ -887,6 +890,267 @@ def sign_partition_image(image_path: Path, partition_name: str):
         )
 
     log_message(f"{partition_name}.img signed successfully")
+import subprocess
+import glob
+
+
+def apply_patch(patch_file, working_dir):
+    working_dir = Path(working_dir)
+
+    if not working_dir.exists():
+        log_message(f"[!] Working directory does not exist: {working_dir}")
+        return False
+
+    if not Path(patch_file).exists():
+        log_message(f"[!] Patch file does not exist: {patch_file}")
+        return False
+
+    result = subprocess.run(
+        ["patch", "-p1", "-i", patch_file],
+        cwd=str(working_dir),
+        capture_output=True,
+        text=True
+    )
+    if result.returncode != 0:
+        log_message(f"[!] Patch failed: {patch_file}")
+        log_message(result.stdout)
+        log_message(result.stderr)
+    else:
+        log_message(f"[+] Patch applied: {patch_file}")
+    return result.returncode == 0
+
+def add_manager_hash(expected_size, expected_hash):
+    # TODO: inspect apk_sign.c after susfs patch is applied to determine
+    # the correct insertion point, then implement this function
+    print("[~] Skipping extra manager hash injection (not yet implemented)")
+    print(f"[~] Would add: size={expected_size}, hash={expected_hash}")
+
+def enable_kernel_configs(kernel_dir):
+    # These configs must be enabled
+    required_configs = [
+        "CONFIG_KSU",
+        "CONFIG_KSU_SUSFS",
+    ]
+
+    # These are optional but recommended SUSFS features
+    optional_configs = [
+        "CONFIG_KSU_SUSFS_SUS_PATH",
+        "CONFIG_KSU_SUSFS_SUS_MOUNT",
+        "CONFIG_KSU_SUSFS_SUS_KSTAT",
+        "CONFIG_KSU_SUSFS_SUS_OVERLAYFS",
+        "CONFIG_KSU_SUSFS_TRY_UMOUNT",
+        "CONFIG_KSU_SUSFS_SPOOF_UNAME",
+        "CONFIG_KSU_SUSFS_ENABLE_LOG",
+        "CONFIG_KSU_SUSFS_OPEN_REDIRECT",
+        "CONFIG_KSU_SUSFS_SUS_SU",
+    ]
+
+    defconfig_path = find_defconfig(kernel_dir)
+    if not defconfig_path:
+        print("[!] Could not find defconfig")
+        return False
+
+    print(f"[+] Using defconfig: {defconfig_path}")
+
+    with open(defconfig_path, "r") as f:
+        content = f.read()
+
+    for config in required_configs:
+        content = set_config(content, config, enabled=True)
+        print(f"[+] Enabled {config}")
+
+    for config in optional_configs:
+        content = set_config(content, config, enabled=True)
+        print(f"[+] Enabled optional {config}")
+
+    with open(defconfig_path, "w") as f:
+        f.write(content)
+
+    print("[+] Defconfig updated successfully")
+    return True
+
+
+def find_defconfig(kernel_dir, defconfig=KERNEL_DEFCONFIG):
+    path = f"{kernel_dir}/arch/arm64/configs/{defconfig}"
+    if os.path.exists(path):
+        return path
+    print(f"[!] Defconfig not found: {path}")
+    return None
+
+
+def set_config(content, config, enabled=True):
+    value = f"{config}=y"
+    disabled = f"# {config} is not set"
+
+    if enabled:
+        if value in content:
+            # Already enabled, nothing to do
+            return content
+        elif disabled in content:
+            # Was explicitly disabled, re-enable it
+            return content.replace(disabled, value)
+        else:
+            # Not present at all, append it
+            return content + f"\n{value}\n"
+    else:
+        if disabled in content:
+            return content
+        elif value in content:
+            return content.replace(value, disabled)
+        else:
+            return content + f"\n{disabled}\n"
+
+def remove_protected_exports(kernel_dir):
+    files_to_remove = [
+        f"{kernel_dir}/common/android/abi_gki_protected_exports_aarch64",
+        f"{kernel_dir}/common/android/abi_gki_protected_exports_x86_64",
+    ]
+
+    for path in files_to_remove:
+        if os.path.exists(path):
+            os.remove(path)
+            print(f"[-] Removed {path}")
+        else:
+            print(f"[~] Skipping {path} (not found)")
+
+def fix_open_c(kernel_dir):
+    open_c_path = Path(kernel_dir) / "fs" / "open.c"
+
+    if not open_c_path.exists():
+        log_message(f"[!] fs/open.c not found: {open_c_path}")
+        return False
+
+    with open(open_c_path, "r") as f:
+        content = f.read()
+
+    # Check if already patched
+    if "retry:" in content:
+        log_message("[~] fs/open.c already patched, skipping.")
+        return True
+
+    # Insert retry label after get_unused_fd_flags
+    old = "        fd = get_unused_fd_flags(how->flags);\n        if (fd >= 0) {"
+    new = (
+        "        fd = get_unused_fd_flags(how->flags);\n"
+        "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n"
+        "retry:\n"
+        "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n"
+        "        if (fd >= 0) {"
+    )
+
+    if old not in content:
+        log_message("[!] Could not find insertion point for retry label in fs/open.c")
+        return False
+
+    content = content.replace(old, new)
+
+    # Insert open redirect check block after do_filp_open
+    old2 = (
+        "                struct file *f = do_filp_open(dfd, tmp, &op);\n"
+        "#ifdef CONFIG_SECURITY_DEFEX"
+    )
+    new2 = (
+        "                struct file *f = do_filp_open(dfd, tmp, &op);\n"
+        "\n"
+        "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n"
+        "                if (!is_inode_open_redirect && f && !IS_ERR(f)) {\n"
+        "                        struct inode *inode = file_inode(f);\n"
+        "                        if (SUSFS_IS_INODE_OPEN_REDIRECT_WITHOUT_UID_CHECK(inode)) {\n"
+        "                                fake_filename = susfs_open_redirect_spoof_do_sys_openat(inode);\n"
+        "                                if (fake_filename && !IS_ERR(fake_filename)) {\n"
+        "                                        is_inode_open_redirect = true;\n"
+        "                                        filp_close(f, NULL);\n"
+        "                                        putname(tmp);\n"
+        "                                        tmp = fake_filename;\n"
+        "                                        goto retry;\n"
+        "                                }\n"
+        "                        }\n"
+        "                }\n"
+        "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n"
+        "\n"
+        "#ifdef CONFIG_SECURITY_DEFEX"
+    )
+
+    if old2 not in content:
+        log_message("[!] Could not find insertion point for open redirect block in fs/open.c")
+        return False
+
+    content = content.replace(old2, new2)
+
+    with open(open_c_path, "w") as f:
+        f.write(content)
+
+    log_message("[+] Successfully patched fs/open.c")
+    return True
+
+def include_susfs_patches(patch_susfs: bool = False):
+    if not patch_susfs:
+        log_message("Patching with SUSFS is not enabled.")
+        return
+
+    log_message("Starting patching with SUSFS.")
+
+    # Find and copy the kernel patch (versioned filename)
+    kernel_patches = list((SUSFS_PATH / "kernel_patches").glob("50_add_susfs_in_gki-*.patch"))
+    if not kernel_patches:
+        log_message("[!] No susfs kernel patch found in SUSFS_PATH/kernel_patches/")
+        return
+
+    patch_kernel_src = kernel_patches[0]
+    patch_kernel_dst = KERNEL_SOURCE_DIR / patch_kernel_src.name
+
+    shutil.copy(patch_kernel_src, patch_kernel_dst)
+    log_message(f"[+] Copied kernel patch to {patch_kernel_dst}")
+
+    shutil.copytree(SUSFS_PATH / "kernel_patches" / "fs",
+                    KERNEL_SOURCE_DIR / "fs", dirs_exist_ok=True)
+    log_message("[+] Copied fs directory")
+
+    shutil.copytree(SUSFS_PATH / "kernel_patches" / "include" / "linux",
+                    KERNEL_SOURCE_DIR / "include" / "linux", dirs_exist_ok=True)
+    log_message("[+] Copied include/linux directory")
+
+    # Apply kernel susfs patch
+    log_message("[+] Applying kernel susfs patch...")
+    if not apply_patch(str(patch_kernel_dst), KERNEL_SOURCE_DIR):
+        log_message("[!] Kernel susfs patch had failures, applying manual fixes...")
+        fix_open_c(KERNEL_SOURCE_DIR)
+
+    enable_kernel_configs(KERNEL_SOURCE_DIR)
+    remove_protected_exports(KERNEL_SOURCE_DIR)
+
+    log_message("[+] SUSFS patching completed successfully.")
+
+
+def patch_with_ksun(install_ksun: bool = False):
+    if not install_ksun:
+        log_message("Skipping KernelSU Next installation...")
+        return
+
+    log_message("Patching using KernelSU Next install script...")
+
+    setup_dst = KERNEL_SOURCE_DIR / "setup.sh"
+    url = "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/next-susfs/kernel/setup.sh"
+
+    log_message(f"Downloading setup.sh from {url}...")
+    if shutil.which("wget"):
+        run_cmd(f"wget -q -O {setup_dst} '{url}'", fatal_on_error=True)
+    elif shutil.which("curl"):
+        run_cmd(f"curl -s -L -o {setup_dst} '{url}'", fatal_on_error=True)
+    else:
+        log_message("ERROR: wget or curl not found")
+        return 1
+
+    result = subprocess.run(["bash", str(setup_dst)],
+                            capture_output=True, text=True,
+                            cwd=KERNEL_SOURCE_DIR)
+
+    if result.returncode != 0:
+        log_message(f"setup.sh failed with output: {result.stdout}")
+        log_message(f"Error: {result.stderr}")
+        return 1
+
+    log_message(f"setup.sh completed: {result.stdout}")
 
 def unpack_tarball(archive_path: Path, dest_dir: Path):
     """
@@ -998,7 +1262,7 @@ def setup_environment(skip_prebuilt_update: bool = False):
     log_message("Initializing environment...")
 
     global TOOLCHAIN_PATH, GAS_PATH, KERNELBUILD_TOOLS_PATH
-    global MKBOOT_PATH, ANYKERNEL_PATH, KERNEL_SOURCE_DIR
+    global MKBOOT_PATH, ANYKERNEL_PATH, KERNEL_SOURCE_DIR, KSU_NEXT_PATH, SUSFS_PATH
 
     # Global Environment Variables
     os.environ["ARCH"] = ARCH
@@ -1050,6 +1314,11 @@ def setup_environment(skip_prebuilt_update: bool = False):
         ROOT_DIR.parent /
         PREBUILTS_CONFIG["Kernel_Source"]["target_dir_name"]
     )
+    KSU_NEXT_PATH = KERNEL_SOURCE_DIR / "KernelSU-Next"
+    SUSFS_PATH = (
+        PREBUILTS_BASE_DIR /
+        PREBUILTS_CONFIG["SUSFS"]["target_dir_name"]
+    )
 
     log_message("Updating global PATH environment variable...")
     extra_paths = filter(None, [
@@ -1059,6 +1328,8 @@ def setup_environment(skip_prebuilt_update: bool = False):
         MKBOOT_PATH,
         ANYKERNEL_PATH,
         KERNEL_SOURCE_DIR,
+        KSU_NEXT_PATH,
+        SUSFS_PATH
     ])
 
     # Add unique paths to the beginning of the PATH
@@ -1099,6 +1370,12 @@ def main():
 
                 ./build_kernel.py --clean --build-all
                     Clean and perform full build with default job count
+                    
+                ./build_kernel.py --install-ksun
+                    Will try to integrate ksu next into the kernel. Can be combined with any other arguments
+                    
+                ./build_kernel.py --install-ksun --patch-susfs
+                    This will try to integrate susfs automatically. --install-ksun option is REQUIRED for this to work!
         """),
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -1178,6 +1455,18 @@ def main():
         help="Enable all build options (dtbo, boot, vendor boot, dlkm, sign)"
     )
 
+    parser.add_argument(
+        "--install-ksun",
+        action="store_true",
+        help="This tries to install KernelSU Next into the kernel."
+    )
+
+    parser.add_argument(
+        "--patch-susfs",
+        action="store_true",
+        help="Build with susfs automatically. KernelSU Next strictly required!"
+    )
+
     args = parser.parse_args()
     # Full build and sign with --build-all
     if args.build_all:
@@ -1190,6 +1479,8 @@ def main():
         args.build_vendor_boot_image = True
         args.build_dlkm_image = True
         args.sign_images = True
+        args.install_ksun = True
+        args.patch_susfs = True
 
     log_message("Starting Android kernel build process...")
 
@@ -1212,6 +1503,19 @@ def main():
         if DIST_DIR.exists():
             log_message(f"Cleaning DIST_DIR: {DIST_DIR}")
             shutil.rmtree(DIST_DIR, ignore_errors=True)
+
+        if args.install_ksun:
+            log_message(f"Running KSUN install function")
+            patch_with_ksun(install_ksun=args.install_ksun)
+
+        if args.patch_susfs and not args.install_ksun:
+            log_message(f"KernelSU-Next patch not enabled, skipping patch")
+            args.patch_susfs = False
+            print("KernelSU-Next patch not enabled, skipping susfs patch!")
+
+        if args.install_ksun and args.patch_susfs:
+            log_message(f"Running susfs patch")
+            include_susfs_patches(patch_susfs=args.patch_susfs)
 
         # Build kernel Image
         # If --extra-local-version is enabled, inject BRANCH and KMI_GENERATION
