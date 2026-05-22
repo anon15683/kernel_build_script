@@ -219,9 +219,12 @@ def build_kernel(jobs: int,
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     MODULES_STAGING_DIR.mkdir(parents=True, exist_ok=True)
 
+    cc = "ccache clang" if shutil.which("ccache") else "clang"
+
     make_args = (
         f"LLVM=1 LLVM_IAS=1 ARCH={ARCH} O={OUT_DIR} "
-        f"CROSS_COMPILE={CROSS_COMPILE_PREFIX}"
+        f"CROSS_COMPILE={CROSS_COMPILE_PREFIX} "
+        f"CC='{cc}'"
     )
 
     log_message(f"Using defconfig: '{KERNEL_DEFCONFIG}'")
@@ -890,9 +893,6 @@ def sign_partition_image(image_path: Path, partition_name: str):
         )
 
     log_message(f"{partition_name}.img signed successfully")
-import subprocess
-import glob
-
 
 def apply_patch(patch_file, working_dir):
     working_dir = Path(working_dir)
@@ -936,11 +936,15 @@ def enable_kernel_configs(kernel_dir):
     optional_configs = [
         "CONFIG_KSU_SUSFS_SUS_PATH",
         "CONFIG_KSU_SUSFS_SUS_MOUNT",
+        "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT",
+        "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT",
         "CONFIG_KSU_SUSFS_SUS_KSTAT",
-        "CONFIG_KSU_SUSFS_SUS_OVERLAYFS",
         "CONFIG_KSU_SUSFS_TRY_UMOUNT",
+        "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT",
         "CONFIG_KSU_SUSFS_SPOOF_UNAME",
         "CONFIG_KSU_SUSFS_ENABLE_LOG",
+        "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS",
+        "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG",
         "CONFIG_KSU_SUSFS_OPEN_REDIRECT",
         "CONFIG_KSU_SUSFS_SUS_SU",
     ]
@@ -1013,75 +1017,97 @@ def remove_protected_exports(kernel_dir):
         else:
             print(f"[~] Skipping {path} (not found)")
 
+
+def fix_sus_su_constants(kernel_dir):
+    susfs_def_path = Path(kernel_dir) / "include" / "linux" / "susfs_def.h"
+
+    if not susfs_def_path.exists():
+        log_message(f"[!] susfs_def.h not found: {susfs_def_path}")
+        return False
+
+    with open(susfs_def_path, "r") as f:
+        content = f.read()
+
+    if "SUS_SU_DISABLED" in content:
+        log_message("[~] SUS_SU constants already defined, skipping.")
+        return True
+
+    constants = (
+        "\n/* SUS_SU working modes */\n"
+        "#define SUS_SU_DISABLED 0\n"
+        "#define SUS_SU_WITH_KPROBES 1\n"
+        "#define SUS_SU_WITH_HOOKS 2\n"
+    )
+
+    content += constants
+
+    with open(susfs_def_path, "w") as f:
+        f.write(content)
+
+    log_message("[+] Added SUS_SU constants to susfs_def.h")
+    return True
+
 def fix_open_c(kernel_dir):
     open_c_path = Path(kernel_dir) / "fs" / "open.c"
-
     if not open_c_path.exists():
         log_message(f"[!] fs/open.c not found: {open_c_path}")
         return False
-
     with open(open_c_path, "r") as f:
         content = f.read()
-
-    # Check if already patched
-    if "retry:" in content:
+    if "retry:\n#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT" in content:
         log_message("[~] fs/open.c already patched, skipping.")
         return True
 
     # Insert retry label after get_unused_fd_flags
-    old = "        fd = get_unused_fd_flags(how->flags);\n        if (fd >= 0) {"
+    old = "\tfd = get_unused_fd_flags(how->flags);\n\tif (fd >= 0) {"
     new = (
-        "        fd = get_unused_fd_flags(how->flags);\n"
+        "\tfd = get_unused_fd_flags(how->flags);\n"
         "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n"
         "retry:\n"
         "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n"
-        "        if (fd >= 0) {"
+        "\tif (fd >= 0) {"
     )
-
     if old not in content:
         log_message("[!] Could not find insertion point for retry label in fs/open.c")
         return False
-
     content = content.replace(old, new)
 
     # Insert open redirect check block after do_filp_open
     old2 = (
-        "                struct file *f = do_filp_open(dfd, tmp, &op);\n"
+        "\t\tstruct file *f = do_filp_open(dfd, tmp, &op);\n"
         "#ifdef CONFIG_SECURITY_DEFEX"
     )
     new2 = (
-        "                struct file *f = do_filp_open(dfd, tmp, &op);\n"
+        "\t\tstruct file *f = do_filp_open(dfd, tmp, &op);\n"
         "\n"
         "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n"
-        "                if (!is_inode_open_redirect && f && !IS_ERR(f)) {\n"
-        "                        struct inode *inode = file_inode(f);\n"
-        "                        if (SUSFS_IS_INODE_OPEN_REDIRECT_WITHOUT_UID_CHECK(inode)) {\n"
-        "                                fake_filename = susfs_open_redirect_spoof_do_sys_openat(inode);\n"
-        "                                if (fake_filename && !IS_ERR(fake_filename)) {\n"
-        "                                        is_inode_open_redirect = true;\n"
-        "                                        filp_close(f, NULL);\n"
-        "                                        putname(tmp);\n"
-        "                                        tmp = fake_filename;\n"
-        "                                        goto retry;\n"
-        "                                }\n"
-        "                        }\n"
-        "                }\n"
+        "\t\tif (!is_inode_open_redirect && f && !IS_ERR(f)) {\n"
+        "\t\t\tstruct inode *inode = file_inode(f);\n"
+        "\t\t\tif (SUSFS_IS_INODE_OPEN_REDIRECT_WITHOUT_UID_CHECK(inode)) {\n"
+        "\t\t\t\tfake_filename = susfs_open_redirect_spoof_do_sys_openat(inode);\n"
+        "\t\t\t\tif (fake_filename && !IS_ERR(fake_filename)) {\n"
+        "\t\t\t\t\tis_inode_open_redirect = true;\n"
+        "\t\t\t\t\tfilp_close(f, NULL);\n"
+        "\t\t\t\t\tputname(tmp);\n"
+        "\t\t\t\t\ttmp = fake_filename;\n"
+        "\t\t\t\t\tgoto retry;\n"
+        "\t\t\t\t}\n"
+        "\t\t\t}\n"
+        "\t\t}\n"
         "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n"
         "\n"
         "#ifdef CONFIG_SECURITY_DEFEX"
     )
-
     if old2 not in content:
         log_message("[!] Could not find insertion point for open redirect block in fs/open.c")
         return False
-
     content = content.replace(old2, new2)
 
     with open(open_c_path, "w") as f:
         f.write(content)
-
     log_message("[+] Successfully patched fs/open.c")
     return True
+
 
 def include_susfs_patches(patch_susfs: bool = False):
     if not patch_susfs:
@@ -1110,6 +1136,8 @@ def include_susfs_patches(patch_susfs: bool = False):
                     KERNEL_SOURCE_DIR / "include" / "linux", dirs_exist_ok=True)
     log_message("[+] Copied include/linux directory")
 
+    fix_sus_su_constants(KERNEL_SOURCE_DIR)
+
     # Apply kernel susfs patch
     log_message("[+] Applying kernel susfs patch...")
     if not apply_patch(str(patch_kernel_dst), KERNEL_SOURCE_DIR):
@@ -1130,7 +1158,7 @@ def patch_with_ksun(install_ksun: bool = False):
     log_message("Patching using KernelSU Next install script...")
 
     setup_dst = KERNEL_SOURCE_DIR / "setup.sh"
-    url = "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/next-susfs/kernel/setup.sh"
+    url = "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh"
 
     log_message(f"Downloading setup.sh from {url}...")
     if shutil.which("wget"):
@@ -1141,9 +1169,11 @@ def patch_with_ksun(install_ksun: bool = False):
         log_message("ERROR: wget or curl not found")
         return 1
 
-    result = subprocess.run(["bash", str(setup_dst)],
-                            capture_output=True, text=True,
-                            cwd=KERNEL_SOURCE_DIR)
+    result = subprocess.run(
+        ["bash", str(setup_dst), "dev-susfs"],
+        capture_output=True, text=True,
+        cwd=KERNEL_SOURCE_DIR
+    )
 
     if result.returncode != 0:
         log_message(f"setup.sh failed with output: {result.stdout}")

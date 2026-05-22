@@ -49,7 +49,7 @@
        "target_dir_name": "susfs",
        "bin_path_suffix": "",
        "download_type": "git",
-       "repo_url": "https://gitlab.com/simonpunk/susfs4ksu.git",
-       "branch": "gki-android14-6.1"
+       "repo_url": "https://gitlab.com/pershoot/susfs4ksu.git",
+       "branch": "gki-android14-6.1-dev"
    }
 }
