@@ -51,6 +51,7 @@ MKBOOT_PATH = None
 ANYKERNEL_PATH = None
 KERNEL_SOURCE_DIR = None
 KSU_NEXT_PATH = None
+SUKISU_PATH = None
 SUSFS_PATH = None
 
 # Config for downloading required prebuilts
@@ -190,6 +191,14 @@ def clean_build_artifacts():
     
     run_cmd("make clean", cwd=KERNEL_SOURCE_DIR, fatal_on_error=False)
     run_cmd("make mrproper", cwd=KERNEL_SOURCE_DIR, fatal_on_error=False)
+
+    # Reset source files modified by patches
+    run_cmd("git checkout -- .", fatal_on_error=True, cwd=KERNEL_SOURCE_DIR)
+    log_message("Reset modified source files")
+
+    # Remove untracked files added by patches (susfs.c, patch files, etc.)
+    run_cmd("git clean -fd", fatal_on_error=True, cwd=KERNEL_SOURCE_DIR)
+    log_message("Removed untracked source files")
     
     if OUT_DIR.exists():
         log_message(f"Removing main output directory: '{OUT_DIR}'")
@@ -1149,6 +1158,63 @@ def include_susfs_patches(patch_susfs: bool = False):
 
     log_message("[+] SUSFS patching completed successfully.")
 
+def patch_with_sukisu(install_sukisu: bool = False):
+    if not install_sukisu:
+        log_message("Skipping SukiSU Ultra installation...")
+        return
+
+    log_message("Patching using SukiSU Ultra install script...")
+
+    # Remove any stale KSU directories to prevent setup.sh from skipping the clone
+    for dirname in ["KernelSU", "KernelSU-Next"]:
+        stale = KERNEL_SOURCE_DIR / dirname
+        if stale.exists():
+            shutil.rmtree(stale)
+            log_message(f"[-] Removed stale {dirname} directory")
+
+    setup_dst = KERNEL_SOURCE_DIR / "setup.sh"
+    url = "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
+
+    log_message(f"Downloading SukiSU Ultra setup.sh from {url}...")
+    if shutil.which("wget"):
+        run_cmd(f"wget -q -O {setup_dst} '{url}'", fatal_on_error=True)
+    elif shutil.which("curl"):
+        run_cmd(f"curl -s -L -o {setup_dst} '{url}'", fatal_on_error=True)
+    else:
+        log_message("ERROR: wget or curl not found")
+        return 1
+
+    result = subprocess.run(
+        ["bash", str(setup_dst), "susfs-main"],
+        capture_output=True, text=True,
+        cwd=KERNEL_SOURCE_DIR
+    )
+
+    if result.returncode != 0:
+        log_message(f"setup.sh failed with output: {result.stdout}")
+        log_message(f"Error: {result.stderr}")
+        return 1
+
+    log_message(f"setup.sh completed: {result.stdout}")
+
+    # Verify the correct repo was cloned
+    if not SUKISU_PATH.exists():
+        log_message("[!] KernelSU directory not found after setup.sh ran")
+        return 1
+
+    remote_result = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=str(SUKISU_PATH),
+        capture_output=True, text=True
+    )
+    remote = remote_result.stdout.strip()
+    log_message(f"[+] KSU remote: {remote}")
+
+    if "SukiSU-Ultra" not in remote:
+        log_message(f"[!] Wrong repo cloned! Expected SukiSU-Ultra but got: {remote}")
+        return 1
+
+    log_message("[+] SukiSU Ultra installed successfully.")
 
 def patch_with_ksun(install_ksun: bool = False):
     if not install_ksun:
@@ -1157,8 +1223,15 @@ def patch_with_ksun(install_ksun: bool = False):
 
     log_message("Patching using KernelSU Next install script...")
 
+    # Remove any stale KSU directories to prevent setup.sh from skipping the clone
+    for dirname in ["KernelSU", "KernelSU-Next"]:
+        stale = KERNEL_SOURCE_DIR / dirname
+        if stale.exists():
+            shutil.rmtree(stale)
+            log_message(f"[-] Removed stale {dirname} directory")
+
     setup_dst = KERNEL_SOURCE_DIR / "setup.sh"
-    url = "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh"
+    url = "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
 
     log_message(f"Downloading setup.sh from {url}...")
     if shutil.which("wget"):
@@ -1170,7 +1243,7 @@ def patch_with_ksun(install_ksun: bool = False):
         return 1
 
     result = subprocess.run(
-        ["bash", str(setup_dst), "dev-susfs"],
+        ["bash", str(setup_dst), " susfs-dev"],
         capture_output=True, text=True,
         cwd=KERNEL_SOURCE_DIR
     )
@@ -1292,7 +1365,7 @@ def setup_environment(skip_prebuilt_update: bool = False):
     log_message("Initializing environment...")
 
     global TOOLCHAIN_PATH, GAS_PATH, KERNELBUILD_TOOLS_PATH
-    global MKBOOT_PATH, ANYKERNEL_PATH, KERNEL_SOURCE_DIR, KSU_NEXT_PATH, SUSFS_PATH
+    global MKBOOT_PATH, ANYKERNEL_PATH, KERNEL_SOURCE_DIR, KSU_NEXT_PATH, SUKISU_PATH, SUSFS_PATH
 
     # Global Environment Variables
     os.environ["ARCH"] = ARCH
@@ -1349,6 +1422,7 @@ def setup_environment(skip_prebuilt_update: bool = False):
         PREBUILTS_BASE_DIR /
         PREBUILTS_CONFIG["SUSFS"]["target_dir_name"]
     )
+    SUKISU_PATH = KERNEL_SOURCE_DIR / "KernelSU"
 
     log_message("Updating global PATH environment variable...")
     extra_paths = filter(None, [
@@ -1402,10 +1476,13 @@ def main():
                     Clean and perform full build with default job count
                     
                 ./build_kernel.py --install-ksun
-                    Will try to integrate ksu next into the kernel. Can be combined with any other arguments
+                    Will try to integrate KernelSU-Next into the kernel. Can be combined with any other arguments
                     
-                ./build_kernel.py --install-ksun --patch-susfs
-                    This will try to integrate susfs automatically. --install-ksun option is REQUIRED for this to work!
+                ./build_kernel.py --install-sukisu
+                    Will try to integrate SukiSU Ultra into the kernel 
+                    
+                ./build_kernel.py --install-ksun/sukisu --patch-susfs
+                    This will try to integrate susfs automatically. --install-ksun/sukisu option is REQUIRED for this to work!
         """),
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -1491,6 +1568,10 @@ def main():
         help="This tries to install KernelSU Next into the kernel."
     )
 
+    parser.add_argument("--install-sukisu",
+        action="store_true",
+        help="Install SukiSU Ultra instead of KernelSU-Next")
+
     parser.add_argument(
         "--patch-susfs",
         action="store_true",
@@ -1500,7 +1581,7 @@ def main():
     args = parser.parse_args()
     # Full build and sign with --build-all
     if args.build_all:
-        log_message("All build options enabled")
+        log_message("All build options enabled, will use KernelSU-Next")
         args.extra_local_version = True
         args.create_dtbo_images = True
         args.create_boot_image = True
@@ -1538,13 +1619,20 @@ def main():
             log_message(f"Running KSUN install function")
             patch_with_ksun(install_ksun=args.install_ksun)
 
-        if args.patch_susfs and not args.install_ksun:
-            log_message(f"KernelSU-Next patch not enabled, skipping patch")
+        if args.install_sukisu:
+            log_message(f"Running sukisu install function")
+            patch_with_sukisu(install_sukisu=args.install_sukisu)
+
+        if args.patch_susfs and not args.install_ksun and not args.install_sukisu:
+            log_message("KernelSU-Next nor SukiSU enabled, skipping patch")
             args.patch_susfs = False
-            print("KernelSU-Next patch not enabled, skipping susfs patch!")
 
         if args.install_ksun and args.patch_susfs:
             log_message(f"Running susfs patch")
+            include_susfs_patches(patch_susfs=args.patch_susfs)
+
+        if args.install_sukisu and args.patch_susfs:
+            log_message(f"Running susfs patch with SukiSU")
             include_susfs_patches(patch_susfs=args.patch_susfs)
 
         # Build kernel Image
