@@ -1,55 +1,69 @@
 {
+  "prebuilts": {
     "Toolchain": {
-        "target_dir_name": "clang/host/linux-x86/llvm-20.1.8-x86_64",
-        "bin_path_suffix": "bin",
-        "download_type": "download_url",
-        "download_url": "https://www.kernel.org/pub/tools/llvm/files/llvm-20.1.8-x86_64.tar.gz",
-        "extract_name_in_archive": "llvm-20.1.8-x86_64"
+      "target_dir_name": "clang/host/linux-x86/llvm-20.1.8-x86_64",
+      "bin_path_suffix": "bin",
+      "download_type": "download_url",
+      "download_url": "https://www.kernel.org/pub/tools/llvm/files/llvm-20.1.8-x86_64.tar.gz",
+      "extract_name_in_archive": "llvm-20.1.8-x86_64"
     },
     "Kernel_Build_Tools": {
-        "target_dir_name": "kernel-build-tools",
-        "bin_path_suffix": "linux-x86/bin",
-        "download_type": "git",
-        "repo_url": "https://android.googlesource.com/kernel/prebuilts/build-tools",
-        "branch": "main-kernel-build-2023",
-        "depth": 1
+      "target_dir_name": "kernel-build-tools",
+      "bin_path_suffix": "linux-x86/bin",
+      "download_type": "git",
+      "repo_url": "https://android.googlesource.com/kernel/prebuilts/build-tools",
+      "branch": "main-kernel-build-2023",
+      "depth": 1
     },
     "GAS": {
-        "target_dir_name": "gas/linux-x86",
-        "bin_path_suffix": "",
-        "download_type": "git",
-        "repo_url": "https://android.googlesource.com/platform/prebuilts/gas/linux-x86",
-        "branch": "main",
-        "depth": 1
+      "target_dir_name": "gas/linux-x86",
+      "bin_path_suffix": "",
+      "download_type": "git",
+      "repo_url": "https://android.googlesource.com/platform/prebuilts/gas/linux-x86",
+      "branch": "main",
+      "depth": 1
     },
     "Mkbootimg_Tool": {
-        "target_dir_name": "mkbootimg",
-        "bin_path_suffix": "",
-        "download_type": "git",
-        "repo_url": "https://android.googlesource.com/platform/system/tools/mkbootimg",
-        "branch": "android14-qpr3-release",
-        "depth": 1
+      "target_dir_name": "mkbootimg",
+      "bin_path_suffix": "",
+      "download_type": "git",
+      "repo_url": "https://android.googlesource.com/platform/system/tools/mkbootimg",
+      "branch": "android14-qpr3-release",
+      "depth": 1
     },
     "Anykernel3": {
-        "target_dir_name": "Anykernel3",
-        "bin_path_suffix": "",
-        "download_type": "git",
-        "repo_url": "https://github.com/osm0sis/AnyKernel3.git",
-        "branch": "master"
+      "target_dir_name": "Anykernel3",
+      "bin_path_suffix": "",
+      "download_type": "git",
+      "repo_url": "https://github.com/osm0sis/AnyKernel3.git",
+      "branch": "master"
     },
     "Kernel_Source": {
-        "target_dir_name": "exynos-kernel",
-        "bin_path_suffix": "",
-        "download_type": "git",
-        "repo_url": "https://github.com/exynos1480/android_kernel_samsung_a55x",
-        "branch": "A556EXXUACYIA",
-        "depth": 1
+      "target_dir_name": "exynos-kernel",
+      "bin_path_suffix": "",
+      "download_type": "git",
+      "repo_url": "https://github.com/exynos1480/android_kernel_samsung_a55x",
+      "branch": "A556EXXUACYIA",
+      "depth": 1
     },
-   "SUSFS": {
-       "target_dir_name": "susfs",
-       "bin_path_suffix": "",
-       "download_type": "git",
-       "repo_url": "https://gitlab.com/pershoot/susfs4ksu.git",
-       "branch": "gki-android14-6.1-dev"
-   }
+    "SUSFS": {
+      "target_dir_name": "susfs",
+      "bin_path_suffix": "",
+      "download_type": "git",
+      "repo_url": "https://gitlab.com/pershoot/susfs4ksu.git",
+      "branch": "gki-android14-6.1-dev"
+    }
+  },
+  "urls": {
+    "KernelSU_Next": {
+      "setup_url": "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh"
+    },
+    "SukiSU_Ultra": {
+      "setup_url": "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh",
+      "hooks_patch_url": "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/hooks/syscall_hooks.patch"
+    },
+    "DroidSpaces": {
+      "base_url": "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12"
+    }
+  }
 }
