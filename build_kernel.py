@@ -1341,7 +1341,7 @@ def patch_with_ksun(install_ksun: bool = False):
     downloader(url, setup_dst)
 
     result = subprocess.run(
-        ["bash", str(setup_dst)],
+        ["bash", str(setup_dst), "dev-susfs"],
         capture_output=True, text=True,
         cwd=KERNEL_SOURCE_DIR,
     )
