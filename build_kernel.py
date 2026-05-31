@@ -1047,7 +1047,7 @@ def add_droidspaces(add_droidspaces: int = 0):
     for patch_id in DROIDSPACES_COMBINATIONS[add_droidspaces]:
         filename   = DROIDSPACES_PATCHES[patch_id]
         patch_file = setup_dst / filename
-        shutil.move(str(patch_file), str(KERNEL_SOURCE_DIR))
+        shutil.move(str(patch_file), str(KERNEL_SOURCE_DIR / filename))
         log_message(f"Applying droidspaces patch {patch_id}: {filename}")
         apply_patch(KERNEL_SOURCE_DIR / filename, KERNEL_SOURCE_DIR)
 
